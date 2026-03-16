@@ -1,0 +1,1290 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>PLATEAU Split View (Area Color + Chiban)</title>
+    <link rel="icon" href="data:,">
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #222; }
+        #info {
+            position: absolute;
+            top: 10px;
+            width: 100%;
+            text-align: center;
+            color: black;
+            font-family: sans-serif;
+            pointer-events: none;
+            background: rgba(255,255,255,0.7);
+            padding: 5px;
+            z-index: 10;
+        }
+        /* 高さ用の凡例（IDを変更） */
+        #legend-height {
+            position: absolute;
+            top: 290px;
+            right: 15px;
+            background: rgba(30, 30, 30, 0.85);
+            color: white;
+            padding: 12px;
+            border-radius: 6px;
+            font-family: sans-serif;
+            font-size: 13px;
+            display: none;
+            pointer-events: none;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            border: 1px solid #444;
+            z-index: 10;
+        }
+        /* 面積用の凡例（新規追加） */
+        #legend-area {
+            position: absolute;
+            top: 290px;
+            right: 15px;
+            background: rgba(30, 30, 30, 0.85);
+            color: white;
+            padding: 12px;
+            border-radius: 6px;
+            font-family: sans-serif;
+            font-size: 13px;
+            display: none;
+            pointer-events: none;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            border: 1px solid #444;
+            z-index: 10;
+        }
+        .legend-title {
+            margin-bottom: 8px;
+            font-weight: bold;
+            font-size: 14px;
+            border-bottom: 1px solid #666;
+            padding-bottom: 4px;
+            text-align: center;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+        .legend-item:last-child { margin-bottom: 0; }
+        .legend-color {
+            width: 16px;
+            height: 16px;
+            margin-right: 10px;
+            border: 1px solid #aaa;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        PLATEAU Split View Demo<br>
+        下部エリア操作: [マウスホイール] ズーム | [Shift + ドラッグ] パン移動<br>
+        <span style="color:red; font-size:0.9em;">※建物の敷地面積（地番合算）による自動色分け機能を搭載</span>
+    </div>
+
+    <div id="legend-height">
+        <div class="legend-title">建物の高さ</div>
+        <div class="legend-item"><div class="legend-color" style="background: rgb(127, 229, 25);"></div><span>10m 以下</span></div>
+        <div class="legend-item"><div class="legend-color" style="background: rgb(255, 229, 0);"></div><span>20m 以下</span></div>
+        <div class="legend-item"><div class="legend-color" style="background: rgb(255, 102, 178);"></div><span>31m 以下</span></div>
+        <div class="legend-item"><div class="legend-color" style="background: rgb(153, 51, 204);"></div><span>31m 超</span></div>
+    </div>
+
+    <div id="legend-area">
+        <div class="legend-title">敷地面積（地番合算）</div>
+        <div class="legend-item"><div class="legend-color" style="background: rgb(127, 229, 25);"></div><span>1,000㎡ 未満</span></div>
+        <div class="legend-item"><div class="legend-color" style="background: rgb(255, 229, 0);"></div><span>1,000 ～ 5,000㎡</span></div>
+        <div class="legend-item"><div class="legend-color" style="background: rgb(255, 102, 102);"></div><span>5,000㎡ 以上</span></div>
+        <div class="legend-item" style="margin-top: 8px; font-size:11px; color:#aaa;">※グレーは対象外/地番なし</div>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+                "three-mesh-bvh": "https://unpkg.com/three-mesh-bvh@0.7.3/build/index.module.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+        import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+        import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
+        import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
+
+        THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+        THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+        THREE.Mesh.prototype.raycast = acceleratedRaycast;
+
+        // ==========================================
+        // ★ 面積計算用のグローバル変数
+        // ==========================================
+        const globalParcelData = []; // 地番ポリゴンデータ { id, minX, maxX, minZ, maxZ, points, area }
+        const buildingFootprints = {}; // 建物ごとの足跡データ
+        const globalBuildingGeometries = []; // 面積属性を更新するための参照リスト
+        let buildingsDone = false;
+        let chibanDone = false;
+        let parcelIdCounter = 1;
+        let buildings60mObject = null; // ★追加：60m建物のモデルを保持する変数
+
+        const buildingFiles = [
+            './asset/buildings_static3.glb',
+            './asset/buildings_60m.glb',
+            './asset/kyoto_station.glb',
+            './asset/kyoto_tower.glb'
+        ];
+
+        const groundFiles = [
+            './asset/ground.glb', // インデックス0: 基準
+            './asset/ground52353670.glb',
+            './asset/ground52353671.glb',
+            './asset/ground52353681.glb'
+        ];
+
+        const CONFIG = {
+            cutAxis: 'X',
+            planeConstant: 100000, 
+            capColor: 0xff3333,
+            groundColor: 0x3333ff,
+            groundThickness: 3.0,
+            heightColorMode: 0, 
+            showChiban: true,
+            show60mBuildings: true, // ★追加：60m建物の表示/非表示フラグ 
+            sectionRatio: 0.3,
+            sectionZoom: 1.0,         
+            sectionX: 0.0,
+            sectionY: 0.0,
+            bounds: null,
+            baseGridY: 0
+        };
+
+        const RING_CONFIG = {
+            visible: true,
+            x: 0,
+            y: 35, // 画像を見る限り、少し浮かす必要がありそうです
+            z: 0,
+            scale: 1.0
+        };
+        let ringObject = null;
+
+        const LAYER_MAIN = 0;
+        const LAYER_SECTION = 1;
+        const LAYER_GRID = 2;
+        const scene = new THREE.Scene();
+
+        // ▼▼ ここから追加：シーンに照明をセット ▼▼
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.8); // 全体を均一に照らす環境光
+        scene.add(ambientLight);
+
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1.5); // 影などの立体感を出す太陽光
+        dirLight.position.set(500, 1000, 500); // 光の当たる角度
+        scene.add(dirLight);
+        // ▲▲ ここまで追加 ▲▲
+
+        const cameraMain = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 50000);
+        cameraMain.position.set(200, 200, 200);
+        cameraMain.layers.enable(LAYER_MAIN);
+        cameraMain.layers.enable(LAYER_SECTION);
+
+        const cameraSection = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 50000);
+        cameraSection.layers.set(LAYER_SECTION);
+        cameraSection.layers.enable(LAYER_GRID);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, stencil: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.localClippingEnabled = true;
+        renderer.autoClear = false;
+        document.body.appendChild(renderer.domElement);
+
+        let renderRequested = false;
+        function requestRenderIfNotRequested() {
+            if (!renderRequested) {
+                renderRequested = true;
+                requestAnimationFrame(render);
+            }
+        }
+
+        const controls = new OrbitControls(cameraMain, renderer.domElement);
+        controls.enableDamping = false; 
+        controls.addEventListener('change', requestRenderIfNotRequested);
+
+        const initNormal = CONFIG.cutAxis === 'X' ? new THREE.Vector3(-1, 0, 0) : new THREE.Vector3(0, 0, -1);
+        const clipPlane = new THREE.Plane(initNormal, CONFIG.planeConstant);
+        const stencilGroup = new THREE.Group();
+        scene.add(stencilGroup);
+
+        const sectionGridGroup = new THREE.Group();
+        sectionGridGroup.layers.set(LAYER_GRID);
+        scene.add(sectionGridGroup);
+
+        const capMaterial = new THREE.MeshBasicMaterial({
+            color: CONFIG.capColor,
+            stencilWrite: true,
+            stencilRef: 1,
+            stencilFunc: THREE.EqualStencilFunc,
+            stencilFail: THREE.KeepStencilOp,
+            stencilZFail: THREE.KeepStencilOp,
+            stencilZPass: THREE.KeepStencilOp,
+            side: THREE.DoubleSide
+        });
+        
+        const capGeometry = new THREE.PlaneGeometry(50000, 50000);
+        const capMesh = new THREE.Mesh(capGeometry, capMaterial);
+        capMesh.renderOrder = 2; 
+        capMesh.layers.set(LAYER_SECTION);
+        stencilGroup.add(capMesh);
+
+        function updateCapMeshPosition() {
+            if (!CONFIG.bounds) return;
+            if (CONFIG.cutAxis === 'X') {
+                capMesh.position.set(clipPlane.constant, CONFIG.bounds.minY + 10000, CONFIG.bounds.centerZ);
+                capMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3(-1, 0, 0));
+            } else {
+                capMesh.position.set(CONFIG.bounds.centerX, CONFIG.bounds.minY + 10000, clipPlane.constant);
+                capMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, -1));
+            }
+        }
+
+        const groundMeshes = [];
+        const groundCapMaterial = new THREE.MeshBasicMaterial({
+            color: CONFIG.groundColor,
+            side: THREE.DoubleSide
+        });
+        const groundCapMesh = new THREE.Mesh(new THREE.BufferGeometry(), groundCapMaterial);
+        groundCapMesh.layers.set(LAYER_SECTION);
+        scene.add(groundCapMesh);
+
+        function updateGroundCap() {
+            if (groundMeshes.length === 0) return;
+            const edges = [];
+            
+            groundMeshes.forEach((mesh) => {
+                const bvh = mesh.geometry.boundsTree;
+                if (!bvh) return;
+
+                const inverseMatrix = new THREE.Matrix4().copy(mesh.matrixWorld).invert();
+                const localPlane = clipPlane.clone().applyMatrix4(inverseMatrix);
+
+                bvh.shapecast({
+                    intersectsBounds: box => localPlane.intersectsBox(box),
+                    intersectsTriangle: tri => {
+                        const dA = localPlane.distanceToPoint(tri.a);
+                        const dB = localPlane.distanceToPoint(tri.b);
+                        const dC = localPlane.distanceToPoint(tri.c);
+
+                        const pts = [];
+                        if ((dA > 0 && dB <= 0) || (dA <= 0 && dB > 0)) pts.push(tri.a.clone().lerp(tri.b, Math.abs(dA) / (Math.abs(dA) + Math.abs(dB))));
+                        if ((dB > 0 && dC <= 0) || (dB <= 0 && dC > 0)) pts.push(tri.b.clone().lerp(tri.c, Math.abs(dB) / (Math.abs(dB) + Math.abs(dC))));
+                        if ((dC > 0 && dA <= 0) || (dC <= 0 && dA > 0)) pts.push(tri.c.clone().lerp(tri.a, Math.abs(dC) / (Math.abs(dC) + Math.abs(dA))));
+
+                        if (pts.length >= 2) {
+                            edges.push(pts[0].applyMatrix4(mesh.matrixWorld));
+                            edges.push(pts[1].applyMatrix4(mesh.matrixWorld));
+                        }
+                    }
+                });
+            });
+
+            const positions = new Float32Array(edges.length * 9);
+            let idx = 0;
+            const thickness = CONFIG.groundThickness;
+
+            for (let i = 0; i < edges.length; i += 2) {
+                const pA = edges[i];
+                const pB = edges[i+1];
+                const bottomA = pA.clone(); bottomA.y -= thickness;
+                const bottomB = pB.clone(); bottomB.y -= thickness;
+
+                positions[idx++] = pA.x; positions[idx++] = pA.y; positions[idx++] = pA.z;
+                positions[idx++] = pB.x; positions[idx++] = pB.y; positions[idx++] = pB.z;
+                positions[idx++] = bottomA.x; positions[idx++] = bottomA.y; positions[idx++] = bottomA.z;
+
+                positions[idx++] = pB.x; positions[idx++] = pB.y; positions[idx++] = pB.z;
+                positions[idx++] = bottomB.x; positions[idx++] = bottomB.y; positions[idx++] = bottomB.z;
+                positions[idx++] = bottomA.x; positions[idx++] = bottomA.y; positions[idx++] = bottomA.z;
+            }
+
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geo.computeVertexNormals();
+            
+            if (groundCapMesh.geometry) groundCapMesh.geometry.dispose();
+            groundCapMesh.geometry = geo;
+        }
+
+        function updateGridLines() {
+            if (!CONFIG.bounds) return;
+
+            while(sectionGridGroup.children.length > 0) {
+                const child = sectionGridGroup.children[0];
+                sectionGridGroup.remove(child);
+                child.geometry.dispose();
+                child.material.dispose();
+            }
+
+            const gridMat = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.3 });
+            const gridPoints = [];
+
+            for(let i = 0; i <= 10; i++) {
+                const y = CONFIG.baseGridY + i * 10;
+                
+                if (CONFIG.cutAxis === 'X') {
+                    const zMin = CONFIG.bounds.centerZ - 50000;
+                    const zMax = CONFIG.bounds.centerZ + 50000;
+                    gridPoints.push(new THREE.Vector3(0, y, zMin));
+                    gridPoints.push(new THREE.Vector3(0, y, zMax));
+                } else {
+                    const xMin = CONFIG.bounds.centerX - 50000;
+                    const xMax = CONFIG.bounds.centerX + 50000;
+                    gridPoints.push(new THREE.Vector3(xMin, y, 0));
+                    gridPoints.push(new THREE.Vector3(xMax, y, 0));
+                }
+            }
+
+            const gridGeo = new THREE.BufferGeometry().setFromPoints(gridPoints);
+            const gridLines = new THREE.LineSegments(gridGeo, gridMat);
+            gridLines.layers.set(LAYER_GRID);
+            sectionGridGroup.add(gridLines);
+
+            updateGridPosition();
+        }
+
+        function updateGridPosition() {
+            if (CONFIG.cutAxis === 'X') {
+                sectionGridGroup.position.set(clipPlane.constant + 0.5, 0, 0);
+            } else {
+                sectionGridGroup.position.set(0, 0, clipPlane.constant + 0.5);
+            }
+        }
+
+        // ==========================================
+        // ★ 面積計算とPoint In Polygonの関数群
+        // ==========================================
+        const MESH_MIN_LON = 135.750000;
+        const MESH_MAX_LON = 135.762500;
+        const MESH_MIN_LAT = 34.983333333333334;
+        const MESH_MAX_LAT = 34.991666666666667;
+
+        function lonLatToWorld(lon, lat, refBox) {
+            const ratioX = (lon - MESH_MIN_LON) / (MESH_MAX_LON - MESH_MIN_LON);
+            const x = refBox.min.x + ratioX * (refBox.max.x - refBox.min.x);
+            const ratioZ = (lat - MESH_MIN_LAT) / (MESH_MAX_LAT - MESH_MIN_LAT);
+            const z = refBox.max.z - ratioZ * (refBox.max.z - refBox.min.z); 
+            return { x, z };
+        }
+
+        // 多角形の面積計算（㎡）
+        function calculatePolygonArea(pts) {
+            let area = 0;
+            const n = pts.length;
+            for (let i = 0; i < n; i++) {
+                const p1 = pts[i];
+                const p2 = pts[(i + 1) % n];
+                area += (p1.x * p2.z - p2.x * p1.z);
+            }
+            return Math.abs(area / 2);
+        }
+
+        // 点が多角形の中にあるか判定
+        function pointInPolygon(pt, vs) {
+            let inside = false;
+            for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
+                const xi = vs[i].x, zi = vs[i].z;
+                const xj = vs[j].x, zj = vs[j].z;
+                const intersect = ((zi > pt.z) !== (zj > pt.z)) && (pt.x < (xj - xi) * (pt.z - zi) / (zj - zi) + xi);
+                if (intersect) inside = !inside;
+            }
+            return inside;
+        }
+
+        function hashStringToColor(str) {
+            let hash = 0;
+            for (let i = 0; i < str.length; i++) {
+                hash = str.charCodeAt(i) + ((hash << 5) - hash);
+            }
+            const c = (hash & 0x00FFFFFF).toString(16).toUpperCase();
+            const hex = "00000".substring(0, 6 - c.length) + c;
+            const color = new THREE.Color(`#${hex}`);
+            const hsl = {};
+            color.getHSL(hsl);
+            color.setHSL(hsl.h, 0.8, 0.6); 
+            return color;
+        }
+
+        let chibanLinesObject = null;
+
+        function loadChibanGeoJSON(urls, groundMeshesList, clipPlaneObj, referenceBox) {
+            const progressDiv = document.createElement('div');
+            progressDiv.style.cssText = 'position:absolute; bottom:20px; right:20px; background:rgba(30,30,30,0.85); color:#ffffff; padding:12px 20px; border-radius:6px; font-family:sans-serif; z-index:9999; border:1px solid #555; font-size: 14px; box-shadow: 0 4px 6px rgba(0,0,0,0.3);';
+            progressDiv.innerHTML = '⏳ 地番界読込中...<br><span id="chiban-progress" style="font-size:12px; color:#aaa;">データ取得中</span>';
+            document.body.appendChild(progressDiv);
+
+            Promise.all(urls.map(url => fetch(url).then(res => res.json())))
+            .then(results => {
+                document.getElementById('chiban-progress').innerText = 'データ解析中...';
+                const segments = []; 
+                const shapeGeometries = []; 
+                
+                const combinedFeatures = [];
+                results.forEach(data => {
+                    if(data && data.features) combinedFeatures.push(...data.features);
+                });
+
+                combinedFeatures.forEach(feature => {
+                    const geom = feature.geometry;
+                    if (!geom) return;
+
+                    const oazaName = feature.properties['大字名'] || '不明';
+                    const featureColor = hashStringToColor(oazaName);
+
+                    function processPolygon(coordinates) {
+                        coordinates.forEach(ring => {
+                            for (let i = 0; i < ring.length - 1; i++) {
+                                segments.push({ p1: ring[i], p2: ring[i+1] });
+                            }
+                        });
+
+                        const extRing = coordinates[0];
+                        const shape = new THREE.Shape();
+                        const points2D = [];
+                        let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+                        
+                        let pt = lonLatToWorld(extRing[0][0], extRing[0][1], referenceBox);
+                        shape.moveTo(pt.x, pt.z);
+                        points2D.push(pt);
+
+                        for(let i=1; i<extRing.length; i++) {
+                            pt = lonLatToWorld(extRing[i][0], extRing[i][1], referenceBox);
+                            shape.lineTo(pt.x, pt.z);
+                            points2D.push(pt);
+                            if(pt.x < minX) minX = pt.x; if(pt.x > maxX) maxX = pt.x;
+                            if(pt.z < minZ) minZ = pt.z; if(pt.z > maxZ) maxZ = pt.z;
+                        }
+
+                        // ★ 面積計算と配列への登録
+                        const area = calculatePolygonArea(points2D);
+                        globalParcelData.push({ id: parcelIdCounter++, minX, maxX, minZ, maxZ, points: points2D, area });
+
+                        for(let i=1; i<coordinates.length; i++) {
+                            const holeRing = coordinates[i];
+                            const hole = new THREE.Path();
+                            pt = lonLatToWorld(holeRing[0][0], holeRing[0][1], referenceBox);
+                            hole.moveTo(pt.x, pt.z);
+                            for(let j=1; j<holeRing.length; j++) {
+                                pt = lonLatToWorld(holeRing[j][0], holeRing[j][1], referenceBox);
+                                hole.lineTo(pt.x, pt.z);
+                            }
+                            shape.holes.push(hole);
+                        }
+
+                        const shapeGeo = new THREE.ShapeGeometry(shape);
+                        const colorAttr = new Float32Array(shapeGeo.attributes.position.count * 3);
+                        for(let i=0; i<shapeGeo.attributes.position.count; i++){
+                            colorAttr[i*3] = featureColor.r;
+                            colorAttr[i*3+1] = featureColor.g;
+                            colorAttr[i*3+2] = featureColor.b;
+                        }
+                        shapeGeo.setAttribute('color', new THREE.BufferAttribute(colorAttr, 3));
+                        shapeGeometries.push(shapeGeo);
+                    }
+
+                    if (geom.type === 'Polygon') {
+                        processPolygon(geom.coordinates);
+                    } else if (geom.type === 'MultiPolygon') {
+                        geom.coordinates.forEach(poly => processPolygon(poly));
+                    }
+                });
+
+                const mergedShapeGeo = BufferGeometryUtils.mergeGeometries(shapeGeometries, false);
+                const shapePosAttr = mergedShapeGeo.attributes.position;
+                const totalShapeVerts = shapePosAttr.count;
+                const newShapePositions = new Float32Array(totalShapeVerts * 3);
+
+                const totalLines = segments.length;
+                const linePositions = new Float32Array(totalLines * 6);
+                let validLineCount = 0; 
+                
+                let phase = 'lines'; 
+                let currentIndex = 0;
+                const CHUNK_SIZE = 1500; 
+                const raycaster = new THREE.Raycaster();
+                const downDir = new THREE.Vector3(0, -1, 0);
+
+                function processChunk() {
+                    const progressSpan = document.getElementById('chiban-progress');
+                    
+                    if (phase === 'lines') {
+                        const endIndex = Math.min(currentIndex + CHUNK_SIZE, totalLines);
+                        for (let i = currentIndex; i < endIndex; i++) {
+                            const seg = segments[i];
+                            const pt1 = lonLatToWorld(seg.p1[0], seg.p1[1], referenceBox);
+                            const pt2 = lonLatToWorld(seg.p2[0], seg.p2[1], referenceBox);
+
+                            let y1 = null, y2 = null;
+                            
+                            raycaster.set(new THREE.Vector3(pt1.x, 2000, pt1.z), downDir);
+                            const hits1 = raycaster.intersectObjects(groundMeshesList, true);
+                            if (hits1.length > 0) y1 = hits1[0].point.y + 0.2; 
+
+                            raycaster.set(new THREE.Vector3(pt2.x, 2000, pt2.z), downDir);
+                            const hits2 = raycaster.intersectObjects(groundMeshesList, true);
+                            if (hits2.length > 0) y2 = hits2[0].point.y + 0.2;
+
+                            if (y1 !== null && y2 !== null) {
+                                const pIdx = validLineCount * 6;
+                                linePositions[pIdx]   = pt1.x; linePositions[pIdx+1] = y1; linePositions[pIdx+2] = pt1.z;
+                                linePositions[pIdx+3] = pt2.x; linePositions[pIdx+4] = y2; linePositions[pIdx+5] = pt2.z;
+                                validLineCount++;
+                            }
+                        }
+                        currentIndex = endIndex;
+                        if(progressSpan) progressSpan.innerText = `境界線投影中: ${Math.floor((currentIndex / totalLines) * 100)}%`;
+
+                        if (currentIndex >= totalLines) {
+                            phase = 'shapes';
+                            currentIndex = 0;
+                        }
+                        requestAnimationFrame(processChunk);
+
+                    } else if (phase === 'shapes') {
+                        const endIndex = Math.min(currentIndex + CHUNK_SIZE, totalShapeVerts);
+                        for (let i = currentIndex; i < endIndex; i++) {
+                            const x = shapePosAttr.getX(i);
+                            const z = shapePosAttr.getY(i); 
+                            
+                            let y = NaN; 
+
+                            raycaster.set(new THREE.Vector3(x, 2000, z), downDir);
+                            const hits = raycaster.intersectObjects(groundMeshesList, true);
+                            if (hits.length > 0) y = hits[0].point.y + 0.15; 
+
+                            const pIdx = i * 3;
+                            newShapePositions[pIdx]   = x;
+                            newShapePositions[pIdx+1] = y;
+                            newShapePositions[pIdx+2] = z;
+                        }
+                        currentIndex = endIndex;
+                        if(progressSpan) progressSpan.innerText = `塗りつぶし投影中: ${Math.floor((currentIndex / totalShapeVerts) * 100)}%`;
+
+                        if (currentIndex >= totalShapeVerts) {
+                            phase = 'done';
+                        }
+                        requestAnimationFrame(processChunk);
+
+                    } else if (phase === 'done') {
+                        if(progressSpan) {
+                            progressSpan.innerText = "描画完了！";
+                            progressSpan.style.color = "#4CAF50";
+                        }
+                        setTimeout(() => progressDiv.remove(), 2500);
+
+                        const finalLinePositions = new Float32Array(linePositions.buffer, 0, validLineCount * 6);
+                        const lineGeo = new THREE.BufferGeometry();
+                        lineGeo.setAttribute('position', new THREE.BufferAttribute(finalLinePositions, 3));
+                        
+                        const lineMat = new THREE.LineBasicMaterial({ 
+                            color: 0x000000, 
+                            opacity: 0.9, 
+                            transparent: true,
+                            clippingPlanes: [clipPlaneObj]
+                        });
+                        const linesMesh = new THREE.LineSegments(lineGeo, lineMat);
+
+                        mergedShapeGeo.setAttribute('position', new THREE.BufferAttribute(newShapePositions, 3));
+                        const meshMat = new THREE.MeshBasicMaterial({
+                            vertexColors: true, 
+                            transparent: true,
+                            opacity: 0.5,
+                            side: THREE.DoubleSide,
+                            clippingPlanes: [clipPlaneObj],
+                            depthWrite: false 
+                        });
+                        const shapesMesh = new THREE.Mesh(mergedShapeGeo, meshMat);
+
+                        chibanLinesObject = new THREE.Group();
+                        chibanLinesObject.add(linesMesh);
+                        chibanLinesObject.add(shapesMesh);
+
+                        chibanLinesObject.layers.set(LAYER_MAIN);
+                        linesMesh.layers.set(LAYER_MAIN);
+                        shapesMesh.layers.set(LAYER_MAIN);
+
+                        chibanLinesObject.visible = CONFIG.showChiban;
+                        scene.add(chibanLinesObject);
+                        requestRenderIfNotRequested();
+
+                        // ★ ロード完了フラグの更新
+                        chibanDone = true;
+                        checkAndRunAreaCalculation();
+                    }
+                }
+                
+                processChunk(); 
+                
+            }).catch(err => {
+                console.error("GeoJSONの読み込みに失敗しました", err);
+                if(document.getElementById('chiban-progress')) {
+                    document.getElementById('chiban-progress').innerText = "読み込みに失敗しました";
+                    document.getElementById('chiban-progress').style.color = "red";
+                }
+            });
+        }
+
+        // ==========================================
+        // ★ 面積計算ロジック
+        // ==========================================
+        function checkAndRunAreaCalculation() {
+            if (buildingsDone && chibanDone) {
+                runSiteAreaCalculation();
+            }
+        }
+
+        function runSiteAreaCalculation() {
+            const progressDiv = document.createElement('div');
+            progressDiv.style.cssText = 'position:absolute; bottom:20px; right:20px; background:rgba(30,30,30,0.85); color:#ffffff; padding:12px 20px; border-radius:6px; font-family:sans-serif; z-index:9999; border:1px solid #ffcc00; font-size: 14px; box-shadow: 0 4px 6px rgba(0,0,0,0.3);';
+            progressDiv.innerHTML = '⚙️ 解析中...<br><span id="calc-progress" style="font-size:12px; color:#ffcc00;">敷地面積を合算しています</span>';
+            document.body.appendChild(progressDiv);
+
+            const buildingIds = Object.keys(buildingFootprints);
+            const total = buildingIds.length;
+            let currentIndex = 0;
+            const CHUNK = 50; 
+
+            function processCalcChunk() {
+                const endIndex = Math.min(currentIndex + CHUNK, total);
+                for(let i = currentIndex; i < endIndex; i++) {
+                    const bId = buildingIds[i];
+                    const bBox = buildingFootprints[bId];
+                    
+                    const cx = (bBox.minX + bBox.maxX) / 2;
+                    const cz = (bBox.minZ + bBox.maxZ) / 2;
+                    const dx = (bBox.maxX - bBox.minX) * 0.45; 
+                    const dz = (bBox.maxZ - bBox.minZ) * 0.45;
+                    const testPoints = [
+                        {x: cx, z: cz}, {x: cx - dx, z: cz - dz}, {x: cx + dx, z: cz - dz}, {x: cx - dx, z: cz + dz}, {x: cx + dx, z: cz + dz}
+                    ];
+
+                    const hitParcels = new Set();
+
+                    for (const pt of testPoints) {
+                        for (const parcel of globalParcelData) {
+                            if (pt.x >= parcel.minX && pt.x <= parcel.maxX && pt.z >= parcel.minZ && pt.z <= parcel.maxZ) {
+                                if (pointInPolygon(pt, parcel.points)) {
+                                    hitParcels.add(parcel.id);
+                                }
+                            }
+                        }
+                    }
+
+                    let totalArea = 0;
+                    hitParcels.forEach(pId => {
+                        const p = globalParcelData.find(p => p.id === pId);
+                        if(p) totalArea += p.area;
+                    });
+
+                    let areaClass = 0;
+                    if (totalArea > 0) {
+                        if (totalArea < 1000) areaClass = 1;
+                        else if (totalArea < 5000) areaClass = 2;
+                        else areaClass = 3;
+                    }
+                    buildingFootprints[bId].areaClass = areaClass;
+                }
+
+                currentIndex = endIndex;
+                if (currentIndex < total) {
+                    const pct = Math.floor((currentIndex/total)*100);
+                    document.getElementById('calc-progress').innerText = `建物解析: ${pct}% 完了`;
+                    requestAnimationFrame(processCalcChunk);
+                } else {
+                    document.getElementById('calc-progress').innerText = '完了！モデルに適用中...';
+                    
+                    globalBuildingGeometries.forEach(geoInfo => {
+                        const { geometry, idAttr, siteAreaAttr } = geoInfo;
+                        for(let i=0; i<idAttr.count; i++) {
+                            const id = idAttr.getX(i);
+                            if (id > 0 && buildingFootprints[id]) {
+                                siteAreaAttr.setX(i, buildingFootprints[id].areaClass || 0);
+                            }
+                        }
+                        siteAreaAttr.needsUpdate = true;
+                    });
+
+                    setTimeout(() => progressDiv.remove(), 2000);
+                    requestRenderIfNotRequested();
+                }
+            }
+            processCalcChunk();
+        }
+
+        const dracoLoader = new DRACOLoader();
+        dracoLoader.setDecoderPath('https://unpkg.com/three@0.160.0/examples/jsm/libs/draco/');
+        const loader = new GLTFLoader();
+        loader.setDRACOLoader(dracoLoader);
+
+        // ★ 変更：ファイル名を識別して判定できるように修正
+        const loadGLTF = (url) => {
+            return new Promise((resolve, reject) => {
+                loader.load(url, (gltf) => resolve({gltf, url}), undefined, reject);
+            });
+        };
+
+        const gui = new GUI();
+        const folderCut = gui.addFolder('切断設定');
+        
+        folderCut.add(CONFIG, 'cutAxis', { '南北軸に切る (X法線)': 'X', '東西軸に切る (Z法線)': 'Z' }).name('切断の向き').onChange((v) => {
+            if (!CONFIG.bounds) return; 
+
+            if (v === 'X') {
+                clipPlane.normal.set(-1, 0, 0);
+                cutSlider.min(CONFIG.bounds.minX);
+                cutSlider.max(CONFIG.bounds.maxX);
+                CONFIG.planeConstant = CONFIG.bounds.maxX;
+            } else {
+                clipPlane.normal.set(0, 0, -1);
+                cutSlider.min(CONFIG.bounds.minZ);
+                cutSlider.max(CONFIG.bounds.maxZ);
+                CONFIG.planeConstant = CONFIG.bounds.maxZ;
+            }
+            
+            clipPlane.constant = CONFIG.planeConstant;
+            updateCapMeshPosition();
+            
+            CONFIG.sectionX = 0; 
+            CONFIG.sectionY = CONFIG.bounds.minY + 10;
+            CONFIG.sectionZoom = 1.0;
+
+            updateGridLines();
+            updateGroundCap();
+            requestRenderIfNotRequested();
+        });
+
+        const cutSlider = folderCut.add(CONFIG, 'planeConstant', -1000, 1000).name('切断位置').listen().onChange((v) => {
+            clipPlane.constant = v;
+            updateCapMeshPosition();
+            updateGridPosition(); 
+            updateGroundCap();
+            requestRenderIfNotRequested();
+        });
+
+        folderCut.add(CONFIG, 'groundThickness', 0.5, 10.0).name('地盤の厚み(m)').onChange(() => {
+            updateGroundCap();
+            requestRenderIfNotRequested();
+        });
+        folderCut.addColor(CONFIG, 'capColor').name('建物の断面色').onChange((v) => {
+            capMaterial.color.set(v);
+            requestRenderIfNotRequested();
+        });
+        folderCut.addColor(CONFIG, 'groundColor').name('地盤の断面色').onChange((v) => {
+            groundCapMaterial.color.set(v);
+            requestRenderIfNotRequested();
+        });
+
+        folderCut.add(CONFIG, 'showChiban').name('地番データの表示').onChange((v) => {
+            if (chibanLinesObject) chibanLinesObject.visible = v;
+            requestRenderIfNotRequested();
+        });
+        // ★追加：60m建物の表示切替スイッチ
+        folderCut.add(CONFIG, 'show60mBuildings').name('60m建物の表示').onChange((v) => {
+            if (buildings60mObject) buildings60mObject.visible = v;
+            requestRenderIfNotRequested();
+        });
+
+        const shaderUniforms = {
+            uColorMode: { value: 0 }
+        };
+
+        // ★ 変更：選択項目を4つに拡張
+        folderCut.add(CONFIG, 'heightColorMode', { 
+            '色分けなし（通常）': 0, 
+            '建物全体を高さで色分け': 1, 
+            '階層状(ウエハース)に色分け': 2,
+            '敷地面積(地番合算)で色分け': 3
+        }).name('建物色分けモード').onChange((v) => {
+            const mode = parseInt(v);
+            shaderUniforms.uColorMode.value = mode;
+            // モードに応じて凡例を切り替え
+            document.getElementById('legend-height').style.display = (mode === 1 || mode === 2) ? 'block' : 'none';
+            document.getElementById('legend-area').style.display = (mode === 3) ? 'block' : 'none';
+            requestRenderIfNotRequested();
+        });
+        
+        const folderSection = gui.addFolder('下部:断面図ビュー設定');
+        folderSection.add(CONFIG, 'sectionRatio', 0.1, 0.7).name('エリアの割合').onChange(() => {
+            requestRenderIfNotRequested();
+        });
+
+// ▼▼ ここから追加 ▼▼
+        const folderRing = gui.addFolder('大屋根リング設定');
+        folderRing.add(RING_CONFIG, 'visible').name('表示').onChange(v => {
+            if (ringObject) ringObject.visible = v;
+            requestRenderIfNotRequested();
+        });
+        folderRing.add(RING_CONFIG, 'x', -5000, 5000).name('X座標').onChange(updateRingTransform);
+        folderRing.add(RING_CONFIG, 'y', -500, 1000).name('Y座標 (高さ)').onChange(updateRingTransform);
+        folderRing.add(RING_CONFIG, 'z', -5000, 5000).name('Z座標').onChange(updateRingTransform);
+        folderRing.add(RING_CONFIG, 'scale', 0.1, 5.0).name('スケール').onChange(updateRingTransform);
+
+        function updateRingTransform() {
+            if (ringObject) {
+                ringObject.position.set(RING_CONFIG.x, RING_CONFIG.y, RING_CONFIG.z);
+                ringObject.scale.setScalar(RING_CONFIG.scale);
+                requestRenderIfNotRequested();
+            }
+        }
+        // ▲▲ ここまで追加 ▲▲
+
+        function addHeightColorShader(material) {
+            material.onBeforeCompile = (shader) => {
+                shader.uniforms.uColorMode = shaderUniforms.uColorMode;
+
+                // ★ 変更：面積属性(_siteAreaClass)を受け取る
+                shader.vertexShader = `
+                    attribute float _height;
+                    attribute float _localHeight;
+                    attribute float _siteAreaClass;
+                    varying float vHeight;
+                    varying float vLocalHeight;
+                    varying float vSiteAreaClass;
+                ` + shader.vertexShader;
+
+                shader.vertexShader = shader.vertexShader.replace(
+                    '#include <begin_vertex>',
+                    `
+                    #include <begin_vertex>
+                    vHeight = _height;
+                    vLocalHeight = _localHeight;
+                    vSiteAreaClass = _siteAreaClass;
+                    `
+                );
+
+                shader.fragmentShader = `
+                    uniform int uColorMode;
+                    varying float vHeight;
+                    varying float vLocalHeight;
+                    varying float vSiteAreaClass;
+                ` + shader.fragmentShader;
+
+                // ★ 変更：uColorMode == 3 の分岐を追加
+                shader.fragmentShader = shader.fragmentShader.replace(
+                    '#include <color_fragment>',
+                    `
+                    #include <color_fragment>
+                    if (uColorMode == 1 || uColorMode == 2) {
+                        float targetHeight = (uColorMode == 1) ? vHeight : vLocalHeight;
+                        vec3 hColor;
+                        if (targetHeight <= 10.0) hColor = vec3(0.5, 0.9, 0.1); 
+                        else if (targetHeight <= 20.0) hColor = vec3(1.0, 0.9, 0.0);
+                        else if (targetHeight <= 31.0) hColor = vec3(1.0, 0.4, 0.7); 
+                        else hColor = vec3(0.6, 0.2, 0.8); 
+                        diffuseColor.rgb = hColor;
+                    } else if (uColorMode == 3) {
+                        if (vSiteAreaClass == 1.0) diffuseColor.rgb = vec3(0.5, 0.9, 0.1); // <1000
+                        else if (vSiteAreaClass == 2.0) diffuseColor.rgb = vec3(1.0, 0.9, 0.0); // 1000-5000
+                        else if (vSiteAreaClass == 3.0) diffuseColor.rgb = vec3(1.0, 0.4, 0.4); // >=5000
+                    }
+                    `
+                );
+            };
+            material.customProgramCacheKey = function() {
+                return 'heightColorModesPatch';
+            };
+        }
+
+
+        // --- モデルのロード ---
+        Promise.all(buildingFiles.map(url => loadGLTF(url))).then((results) => {
+            results.forEach(({gltf, url}) => {
+                const model = gltf.scene;
+                // ★ 変更：対象モデルの判定
+                const isTargetModel = url.includes('buildings_static3.glb');
+
+                // ★追加：60m建物のモデルを変数に保持し、初期表示状態をセットする
+                if (url.includes('buildings_60m.glb')) {
+                    buildings60mObject = model;
+                    buildings60mObject.visible = CONFIG.show60mBuildings;
+                }
+
+                model.traverse((child) => {
+                    if (child.isMesh) {
+                        
+                        const posAttr = child.geometry.attributes.position;
+                        const idAttr = child.geometry.attributes._building_id || child.geometry.attributes._BUILDING_ID;
+                        
+                        let siteAreaClassAttr = null;
+
+                        if (posAttr && idAttr) {
+                            const vertexCount = posAttr.count;
+                            const buildingMinY = {};
+                            
+                            for (let i = 0; i < vertexCount; i++) {
+                                const id = idAttr.getX(i);
+                                const y = posAttr.getY(i);
+                                if (id > 0) {
+                                    if (buildingMinY[id] === undefined) {
+                                        buildingMinY[id] = y;
+                                    } else {
+                                        buildingMinY[id] = Math.min(buildingMinY[id], y);
+                                    }
+                                }
+                            }
+
+                            const localHeights = new Float32Array(vertexCount);
+                            // ★ 追加：空の面積クラス属性をセット
+                            const siteAreaClasses = new Float32Array(vertexCount);
+                            siteAreaClassAttr = new THREE.BufferAttribute(siteAreaClasses, 1);
+                            child.geometry.setAttribute('_siteAreaClass', siteAreaClassAttr);
+
+                            for (let i = 0; i < vertexCount; i++) {
+                                const id = idAttr.getX(i);
+                                const y = posAttr.getY(i);
+                                if (id > 0 && buildingMinY[id] !== undefined) {
+                                    localHeights[i] = y - buildingMinY[id];
+
+                                    // ★ 足跡（BBox）の記録
+                                    if (isTargetModel && localHeights[i] < 0.5) {
+                                        const x = posAttr.getX(i); const z = posAttr.getZ(i);
+                                        if (!buildingFootprints[id]) buildingFootprints[id] = { minX: Infinity, maxX: -Infinity, minZ: Infinity, maxZ: -Infinity };
+                                        if (x < buildingFootprints[id].minX) buildingFootprints[id].minX = x;
+                                        if (x > buildingFootprints[id].maxX) buildingFootprints[id].maxX = x;
+                                        if (z < buildingFootprints[id].minZ) buildingFootprints[id].minZ = z;
+                                        if (z > buildingFootprints[id].maxZ) buildingFootprints[id].maxZ = z;
+                                    }
+
+                                } else {
+                                    localHeights[i] = 0;
+                                }
+                            }
+                            child.geometry.setAttribute('_localHeight', new THREE.BufferAttribute(localHeights, 1));
+                            
+                            // ★ 更新用に保存
+                            if (isTargetModel) {
+                                globalBuildingGeometries.push({ geometry: child.geometry, idAttr, siteAreaAttr: siteAreaClassAttr });
+                            }
+                        }
+
+                        const oldMat = child.material;
+                        child.material = new THREE.MeshBasicMaterial({
+                            color: oldMat.color || 0xdddddd,
+                            map: oldMat.map || null
+                        });
+
+                        const edgesGeo = new THREE.EdgesGeometry(child.geometry, 15);
+                        const edgesMat = new THREE.LineBasicMaterial({ color: 0x333333 });
+                        edgesMat.clippingPlanes = [clipPlane];
+                        const edges = new THREE.LineSegments(edgesGeo, edgesMat);
+                        child.add(edges);
+
+                        child.material.clippingPlanes = [clipPlane];
+                        
+                        const hasHeightAttr = (child.geometry.attributes._height || child.geometry.attributes._HEIGHT) !== undefined;
+                        if (hasHeightAttr) {
+                            addHeightColorShader(child.material); 
+                        }
+
+                        const matBack = child.material.clone();
+                        matBack.colorWrite = false; matBack.depthWrite = false; matBack.side = THREE.BackSide;
+                        matBack.clippingPlanes = [clipPlane]; matBack.stencilWrite = true; 
+                        matBack.stencilFunc = THREE.AlwaysStencilFunc;
+                        matBack.stencilFail = THREE.IncrementWrapStencilOp;
+                        matBack.stencilZFail = THREE.IncrementWrapStencilOp;
+                        matBack.stencilZPass = THREE.IncrementWrapStencilOp;
+                        
+                        if (hasHeightAttr) addHeightColorShader(matBack);
+
+                        const meshBack = new THREE.Mesh(child.geometry, matBack);
+                        meshBack.renderOrder = 1; 
+                        meshBack.layers.set(LAYER_SECTION);
+                        stencilGroup.add(meshBack);
+
+                        const matFront = child.material.clone();
+                        matFront.colorWrite = false; matFront.depthWrite = false; matFront.side = THREE.FrontSide;
+                        matFront.clippingPlanes = [clipPlane]; matFront.stencilWrite = true; 
+                        matFront.stencilFunc = THREE.AlwaysStencilFunc;
+                        matFront.stencilFail = THREE.DecrementWrapStencilOp;
+                        matFront.stencilZFail = THREE.DecrementWrapStencilOp;
+                        matFront.stencilZPass = THREE.DecrementWrapStencilOp;
+                        
+                        if (hasHeightAttr) addHeightColorShader(matFront);
+
+                        const meshFront = new THREE.Mesh(child.geometry, matFront);
+                        meshFront.renderOrder = 1; 
+                        meshFront.layers.set(LAYER_SECTION);
+                        stencilGroup.add(meshFront);
+                    }
+                });
+                scene.add(model);
+            });
+            requestRenderIfNotRequested();
+
+            // ★ ロード完了フラグの更新
+            buildingsDone = true;
+            checkAndRunAreaCalculation();
+
+        }).catch(err => console.error("建物のロードに失敗しました", err));
+
+
+        Promise.all(groundFiles.map(url => loadGLTF(url))).then((results) => {
+            const overallBox = new THREE.Box3(); 
+            const refGroundBox = new THREE.Box3();
+            
+            let totalY = 0;
+            let count = 0;
+
+            results.forEach(({gltf, url}, index) => {
+                const ground = gltf.scene;
+                
+                overallBox.expandByObject(ground);
+
+                if (index === 0) {
+                    refGroundBox.expandByObject(ground);
+                }
+
+                ground.traverse((child) => {
+                    if (child.isMesh) {
+                        
+                        const oldMat = child.material;
+                        child.material = new THREE.MeshBasicMaterial({
+                            color: oldMat.color || 0xcccccc,
+                            map: oldMat.map || null,
+                            side: THREE.DoubleSide
+                        });
+
+                        const edgesGeo = new THREE.EdgesGeometry(child.geometry, 20);
+                        const edgesMat = new THREE.LineBasicMaterial({ color: 0x555555 });
+                        edgesMat.clippingPlanes = [clipPlane];
+                        const edges = new THREE.LineSegments(edgesGeo, edgesMat);
+                        child.add(edges);
+
+                        child.material.clippingPlanes = [clipPlane];
+                        child.geometry.computeBoundsTree();
+                        groundMeshes.push(child);
+
+                        const pos = child.geometry.attributes.position;
+                        const mat = child.matrixWorld;
+                        const vec = new THREE.Vector3();
+                        for(let i = 0; i < pos.count; i++) {
+                            vec.fromBufferAttribute(pos, i).applyMatrix4(mat);
+                            totalY += vec.y;
+                            count++;
+                        }
+                    }
+                });
+                scene.add(ground);
+            });
+
+            CONFIG.bounds = {
+                minX: overallBox.min.x,
+                maxX: overallBox.max.x,
+                minZ: overallBox.min.z,
+                maxZ: overallBox.max.z,
+                minY: overallBox.min.y,
+                centerX: (overallBox.max.x + overallBox.min.x) / 2,
+                centerZ: (overallBox.max.z + overallBox.min.z) / 2,
+                sizeX: overallBox.max.x - overallBox.min.x,
+                sizeZ: overallBox.max.z - overallBox.min.z,
+            };
+
+            CONFIG.planeConstant = CONFIG.bounds.maxX;
+            cutSlider.min(CONFIG.bounds.minX);
+            cutSlider.max(CONFIG.bounds.maxX);
+            
+            clipPlane.constant = CONFIG.planeConstant;
+            
+            updateCapMeshPosition();
+
+            CONFIG.sectionY = CONFIG.bounds.minY + 10; 
+
+            const averageGroundY = count > 0 ? totalY / count : 0;
+            CONFIG.baseGridY = Math.round(averageGroundY);
+
+            updateGridLines();
+            updateGroundCap();
+            requestRenderIfNotRequested();
+
+            loadChibanGeoJSON([
+                './asset/26106__6_r_2025.geojson',
+                './asset/26107__6_r_2025.geojson'
+            ], groundMeshes, clipPlane, refGroundBox);
+
+        }).catch(err => console.error("地盤のロードに失敗しました", err));
+
+        // --- 大屋根リングのロード ---
+        loadGLTF('./asset/ring.glb').then(({gltf}) => {
+            ringObject = gltf.scene;
+
+            ringObject.traverse((child) => {
+                if (child.isMesh) {
+                    if (child.material) {
+                        // ▼▼ 修正箇所：光の影響を受けないBasicMaterialに変換する ▼▼
+                        const oldMat = child.material;
+                        child.material = new THREE.MeshBasicMaterial({
+                            color: oldMat.color || 0xffffff, // 基本色
+                            map: oldMat.map || null,         // テクスチャ画像を引き継ぐ
+                            side: THREE.DoubleSide           // 裏面も描画
+                        });
+                        // ▲▲ 修正箇所 ここまで ▲▲
+
+                        // スライス機能（クリッピング）を適用
+                        child.material.clippingPlanes = [clipPlane];
+                    }
+                }
+            });
+
+            // 初期位置とスケールを適用
+            updateRingTransform();
+            
+            scene.add(ringObject);
+            requestRenderIfNotRequested();
+            console.log("大屋根リングのロード完了");
+
+        }).catch(err => console.error("リングモデルのロードに失敗しました", err));
+        // ▲▲ ここまで追加 ▲▲        
+
+        // --- マウス操作等のイベント ---
+        let isSectionDragging = false;
+        let previousMousePos = { x: 0, y: 0 };
+
+        renderer.domElement.addEventListener('pointermove', (e) => {
+            const sectionHeight = window.innerHeight * CONFIG.sectionRatio;
+            const isBottomArea = e.clientY > (window.innerHeight - sectionHeight);
+
+            if (isBottomArea) {
+                controls.enabled = false;
+                if (e.shiftKey) {
+                    renderer.domElement.style.cursor = isSectionDragging ? 'grabbing' : 'grab';
+                } else {
+                    renderer.domElement.style.cursor = 'default';
+                }
+            } else {
+                renderer.domElement.style.cursor = 'auto';
+                if (!isSectionDragging) controls.enabled = true;
+            }
+
+            if (isSectionDragging && e.shiftKey) {
+                const deltaX = e.clientX - previousMousePos.x;
+                const deltaY = e.clientY - previousMousePos.y;
+
+                const aspect = window.innerWidth / sectionHeight;
+                const targetCameraWidth = (CONFIG.cutAxis === 'X' ? CONFIG.bounds.sizeZ : CONFIG.bounds.sizeX) / 0.9 / CONFIG.sectionZoom;
+                const targetCameraHeight = targetCameraWidth / aspect;
+
+                const unitsPerPixelX = targetCameraWidth / window.innerWidth;
+                const unitsPerPixelY = targetCameraHeight / sectionHeight;
+
+                CONFIG.sectionX += deltaX * unitsPerPixelX; 
+                CONFIG.sectionY += deltaY * unitsPerPixelY; 
+
+                previousMousePos = { x: e.clientX, y: e.clientY };
+                requestRenderIfNotRequested();
+            }
+        });
+
+        renderer.domElement.addEventListener('pointerdown', (e) => {
+            const sectionHeight = window.innerHeight * CONFIG.sectionRatio;
+            const isBottomArea = e.clientY > (window.innerHeight - sectionHeight);
+            
+            if (isBottomArea && e.shiftKey) {
+                isSectionDragging = true;
+                previousMousePos = { x: e.clientX, y: e.clientY };
+            }
+        });
+
+        window.addEventListener('pointerup', () => {
+            isSectionDragging = false;
+            renderer.domElement.style.cursor = 'auto';
+        });
+
+        window.addEventListener('keyup', (e) => {
+            if (e.key === 'Shift') {
+                isSectionDragging = false;
+                renderer.domElement.style.cursor = 'auto';
+            }
+        });
+
+        renderer.domElement.addEventListener('wheel', (e) => {
+            const sectionHeight = window.innerHeight * CONFIG.sectionRatio;
+            const isBottomArea = e.clientY > (window.innerHeight - sectionHeight);
+            
+            if (isBottomArea) {
+                e.preventDefault();
+                e.stopPropagation();
+                
+                const zoomSpeed = 0.1;
+                if (e.deltaY < 0) {
+                    CONFIG.sectionZoom *= (1 + zoomSpeed);
+                } else {
+                    CONFIG.sectionZoom /= (1 + zoomSpeed);
+                }
+                CONFIG.sectionZoom = Math.max(0.1, Math.min(CONFIG.sectionZoom, 100.0));
+                requestRenderIfNotRequested();
+            }
+        }, { passive: false });
+
+        function render() {
+            renderRequested = false;
+            controls.update();
+
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+            
+            const sectionHeight = Math.floor(height * CONFIG.sectionRatio);
+            const mainHeight = height - sectionHeight;
+
+            renderer.setScissorTest(true);
+
+            // 上半分：メインビュー
+            renderer.setViewport(0, sectionHeight, width, mainHeight);
+            renderer.setScissor(0, sectionHeight, width, mainHeight);
+            renderer.setClearColor(0xe0e0e0);
+            
+            cameraMain.aspect = width / mainHeight;
+            cameraMain.updateProjectionMatrix();
+            
+            renderer.clear();
+            renderer.render(scene, cameraMain);
+
+            // 下半分：断面図ビュー
+            renderer.setViewport(0, 0, width, sectionHeight);
+            renderer.setScissor(0, 0, width, sectionHeight);
+            renderer.setClearColor(0xf5f5f5);
+            
+            if (!CONFIG.bounds) return;
+
+            const aspect = width / sectionHeight;
+            
+            const targetCameraWidth = (CONFIG.cutAxis === 'X' ? CONFIG.bounds.sizeZ : CONFIG.bounds.sizeX) / 0.9 / CONFIG.sectionZoom;
+            const targetCameraHeight = targetCameraWidth / aspect;
+            
+            cameraSection.left = -targetCameraWidth / 2;
+            cameraSection.right = targetCameraWidth / 2;
+            cameraSection.top = targetCameraHeight / 2;
+            cameraSection.bottom = -targetCameraHeight / 2;
+            
+            if (CONFIG.cutAxis === 'X') {
+                cameraSection.position.set(clipPlane.constant + 100, CONFIG.sectionY, CONFIG.bounds.centerZ + CONFIG.sectionX);
+                cameraSection.lookAt(clipPlane.constant, CONFIG.sectionY, CONFIG.bounds.centerZ + CONFIG.sectionX);
+            } else {
+                cameraSection.position.set(CONFIG.bounds.centerX - CONFIG.sectionX, CONFIG.sectionY, clipPlane.constant + 100);
+                cameraSection.lookAt(CONFIG.bounds.centerX - CONFIG.sectionX, CONFIG.sectionY, clipPlane.constant);
+            }
+            cameraSection.updateProjectionMatrix();
+
+            renderer.clear();
+            renderer.render(scene, cameraSection);
+        }
+
+        window.addEventListener('resize', () => {
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            requestRenderIfNotRequested();
+        });
+
+    </script>
+</body>
+</html>
